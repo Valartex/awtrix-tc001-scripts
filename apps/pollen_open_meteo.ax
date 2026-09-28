@@ -1,0 +1,117 @@
+# @name    Пыльца Open-Meteo
+# @desc    Показывает доминирующий аллерген только при ненулевой концентрации
+# @author  Codex
+# Идея: Valart
+# @version 1.0
+# @config  latitude     text   "Широта" default="55.7558" maxlen=16
+# @config  longitude    text   "Долгота" default="37.6176" maxlen=16
+# @config  pollen_hours number "Обновление" default=3 min=1 max=24 unit="ч"
+# @config  pollen_url   text   "Адрес Open-Meteo" default="http://air-quality-api.open-meteo.com/v1/air-quality" maxlen=160
+
+class OpenMeteoPollen
+  var url, opts, period, ticks, age, busy
+  var concentration, label, color
+
+  def init()
+    self.url = store.get("pollen_url") +
+               "?latitude=" + store.get("latitude") +
+               "&longitude=" + store.get("longitude") +
+               "&current=alder_pollen,birch_pollen,grass_pollen,mugwort_pollen,ragweed_pollen" +
+               "&forecast_days=1"
+    self.opts = {'find': '"current":', 'keep': 640}
+    self.period = store.get("pollen_hours") * 3600
+    self.ticks = 1
+    self.busy = false
+    self.concentration = store.get("concentration")
+    self.label = store.get("label")
+    self.color = store.get("color", 0xB7E000)
+    self.age = self.concentration == nil ? self.period * 2 + 1 : 0
+  end
+
+  def use_value(response, field, name, best, best_name)
+    var match = re.search('"' + field + '":\\s*([0-9.]+)', response)
+    if match == nil return [best, best_name] end
+    var value = num(match[1])
+    if value != nil && value > best return [value, name] end
+    return [best, best_name]
+  end
+
+  def on_body(response, status)
+    self.busy = false
+    shared.set("f", 0)
+    shared.set("pollen_status", status)
+    if status != 200 || response == nil return end
+
+    var best = 0
+    var best_name = ""
+    var result = self.use_value(response, "alder_pollen", "Ольха", best, best_name)
+    best = result[0]; best_name = result[1]
+    result = self.use_value(response, "birch_pollen", "Берёза", best, best_name)
+    best = result[0]; best_name = result[1]
+    result = self.use_value(response, "grass_pollen", "Трава", best, best_name)
+    best = result[0]; best_name = result[1]
+    result = self.use_value(response, "mugwort_pollen", "Полынь", best, best_name)
+    best = result[0]; best_name = result[1]
+    result = self.use_value(response, "ragweed_pollen", "Амброзия", best, best_name)
+    best = result[0]; best_name = result[1]
+
+    self.concentration = best
+    self.label = best > 0 ? best_name + " " + str(round(best)) : ""
+    self.color = best > 100 ? 0xFF2020 : (best > 20 ? 0xFFAA00 : 0xB7E000)
+    self.age = 0
+    store.set("concentration", best)
+    store.set("label", self.label)
+    store.set("color", self.color)
+    shared.set("concentration", best)
+  end
+
+  def tls_busy()
+    for key : shared.keys()
+      if size(key) > 2 && key[size(key) - 2 .. size(key) - 1] == ".f" && shared.get(key) == 1
+        var request_age = shared.age(key)
+        if request_age != nil && request_age < 20000 return true end
+      end
+    end
+    return false
+  end
+
+  def loop()
+    self.age += 1
+    if self.ticks <= 0 && !self.busy && !self.tls_busy()
+      self.ticks = self.period
+      self.busy = true
+      shared.set("f", 1)
+      http.get(self.url, / response, status -> self.on_body(response, status), self.opts)
+    end
+    self.ticks -= 1
+  end
+
+  def should_show()
+    return self.concentration != nil && self.concentration > 0 && self.age <= self.period * 2
+  end
+
+  def draw_flower()
+    pixel(3, 0, 0xF7A8D8)
+    pixel(1, 2, 0xF7A8D8)
+    pixel(5, 2, 0xF7A8D8)
+    pixel(2, 1, 0xE56AB3)
+    pixel(4, 1, 0xE56AB3)
+    pixel(2, 3, 0xE56AB3)
+    pixel(4, 3, 0xE56AB3)
+    pixel(3, 2, 0xFFCC22)
+    line(3, 3, 3, 7, 0x55AA44)
+    pixel(2, 5, 0x55AA44)
+  end
+
+  def draw()
+    clear()
+    self.draw_flower()
+    scroll_text(8, 6, width() - 8, self.label, self.color)
+  end
+
+  def on_button(button)
+    if button == "select" self.ticks = 0 end
+  end
+end
+
+return OpenMeteoPollen()

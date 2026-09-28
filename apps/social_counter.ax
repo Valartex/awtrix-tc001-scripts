@@ -1,0 +1,144 @@
+# @name    Likee
+# @desc    Количество подписчиков профиля Likee
+# @author  Codex
+# Идея: Valart
+# @version 2.1
+# @config  likee_id    text   "Likee ID" default="" maxlen=64
+# @config  refresh_min number "Обновление" default=30 min=10 max=1440 unit="мин"
+# @config  likee_url   text   "Адрес Likee API" default="https://api.like-video.com/likee-activity-flow-micro/official_website/WebView/getProfileDetail" maxlen=256
+
+class LikeeCounter
+  var url, likee_id, body, opts, period
+  var count, label, full, err
+  var ticks, busy, ramp
+
+  def init()
+    self.likee_id = store.get("likee_id")
+    self.url = store.get("likee_url")
+    self.body = "{\"likeeId\":\"" + self.likee_id + "\"}"
+    self.opts = {
+      'headers': {'Content-Type': 'application/json'},
+      'find': '"fansCount":',
+      'keep': 80
+    }
+    self.period = store.get("refresh_min") * 60
+
+    self.count = store.get("who") == self.likee_id ? store.get("n") : nil
+    self.label = self.count == nil ? nil : self.human(self.count)
+    self.full = self.count == nil ? nil : str(self.count)
+    self.err = false
+    self.ticks = 15
+    self.busy = false
+    self.ramp = [0xFFAA22, 0xFF2E74, 0xA43CFF]
+  end
+
+  def human(n)
+    if n < 1000 return str(n) end
+    var divisor = 1000
+    var suffix = "K"
+    if n >= 1000000000
+      divisor = 1000000000
+      suffix = "B"
+    elif n >= 1000000
+      divisor = 1000000
+      suffix = "M"
+    end
+    var value = n / (divisor + 0.0)
+    if value >= 10 return str(round(value)) + suffix end
+    var tenths = round(value * 10)
+    return str(int(tenths / 10)) + "." + str(tenths % 10) + suffix
+  end
+
+  def on_body(response, status)
+    self.busy = false
+    shared.set("f", 0)
+
+    if status != 200 || response == nil
+      self.err = true
+      return
+    end
+
+    var match = re.search("(\\d+)", response)
+    if match == nil
+      self.err = true
+      return
+    end
+
+    var value = num(match[1])
+    if value == nil
+      self.err = true
+      return
+    end
+
+    self.err = false
+    if value == self.count return end
+
+    self.count = value
+    self.full = str(value)
+    self.label = self.human(value)
+    store.set("n", value)
+    store.set("who", self.likee_id)
+  end
+
+  def tls_busy()
+    for key : shared.keys()
+      if size(key) > 2 && key[size(key) - 2 .. size(key) - 1] == ".f" && shared.get(key) == 1
+        var age = shared.age(key)
+        if age != nil && age < 20000 return true end
+      end
+    end
+    return false
+  end
+
+  def loop()
+    if self.likee_id == "" return end
+
+    if self.ticks <= 0
+      if !self.busy && !self.tls_busy()
+        self.ticks = self.period
+        self.busy = true
+        shared.set("f", 1)
+        http.post(self.url, self.body, / response, status -> self.on_body(response, status), self.opts)
+      end
+    end
+    self.ticks -= 1
+  end
+
+  def draw_likee_icon()
+    line(1, 0, 2, 0, 0xFFAA22)
+    line(5, 0, 6, 0, 0xFF4B8B)
+    line(0, 1, 3, 1, 0xFF8A2B)
+    line(4, 1, 7, 1, 0xFF3E80)
+    line(0, 2, 2, 2, 0xFF6B35)
+    line(3, 2, 7, 2, 0xFF2E74)
+    line(0, 3, 7, 3, 0xF72B8F)
+    line(0, 4, 7, 4, 0xE52DA8)
+    line(1, 5, 6, 5, 0xC233D1)
+    line(2, 6, 5, 6, 0xA43CFF)
+    line(3, 7, 4, 7, 0x7047EB)
+  end
+
+  def draw()
+    clear()
+    self.draw_likee_icon()
+
+    if self.label != nil
+      var available = width() - 10
+      var value = self.full
+      var value_width = text_ink_width(value)
+      if value_width > available
+        value = self.label
+        value_width = text_ink_width(value)
+      end
+      ramp_text(10 + (available - value_width) / 2, 6, value, self.ramp)
+      return
+    end
+
+    var placeholder = self.err ? "?" : "..."
+    var placeholder_width = text_ink_width(placeholder)
+    text(10 + (width() - 10 - placeholder_width) / 2, 6, placeholder,
+         self.err ? 0xCC7722 : 0x555555)
+  end
+end
+
+return LikeeCounter()

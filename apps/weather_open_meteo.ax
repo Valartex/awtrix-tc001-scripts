@@ -1,0 +1,197 @@
+# @name    Погода Open-Meteo
+# @desc    Текущая погода и прогнозный тренд температуры на 15 часов
+# @author  Codex / Hank_the_Tank
+# Идея: Valart
+# @version 2.3
+# @icons   53386, 2286, 53384, 17055, 2720, 2289, 49300, 29839, 36637
+# @config  latitude    text   "Широта" default="55.7558" maxlen=16
+# @config  longitude   text   "Долгота" default="37.6176" maxlen=16
+# @config  weather_min number "Обновление" default=30 min=10 max=360 unit="мин"
+# @config  weather_url text   "Адрес Open-Meteo" default="http://api.open-meteo.com/v1/forecast" maxlen=160
+# @config  weather_ip  text   "Резервный IP Open-Meteo" default="188.40.99.226" maxlen=45
+
+class OpenMeteoWeather
+  var stops, forecast, temperature, label, color, weather_icon, trend
+  var url, opts, period, ticks, age, busy
+
+  def init()
+    self.stops = [-12, 0xD977DF, -6, 0x9545BC, -1, 0x4B379C, 0, 0xFEC4FF,
+                  4, 0x31B8DB, 10, 0x31DB8B, 15, 0x6ED228, 21, 0xFFFF28,
+                  27, 0xF87E27, 32, 0xCF3927, 38, 0xA12527]
+    self.forecast = []
+    self.temperature = store.get("temperature")
+    self.label = self.temperature == nil ? nil : self.temperature_label(self.temperature)
+    self.color = store.get("color", 0x666666)
+    self.weather_icon = store.get("icon", "36637")
+    self.trend = store.get("trend", 0)
+
+    self.url = store.get("weather_url") +
+               "?latitude=" + store.get("latitude") +
+               "&longitude=" + store.get("longitude") +
+               "&current=temperature_2m,weather_code" +
+               "&hourly=temperature_2m&forecast_hours=15" +
+               "&timeformat=unixtime&timezone=auto"
+    self.opts = {
+      'headers': {'X-AWTRIX-Resolve-IP': store.get("weather_ip")},
+      'find': '"current":',
+      'keep': 960
+    }
+    self.period = store.get("weather_min") * 60
+    self.ticks = 0
+    self.age = self.temperature == nil ? self.period * 2 + 1 : 0
+    self.busy = false
+  end
+
+  def temperature_label(value)
+    return str(int(value + (value >= 0 ? 0.5 : -0.5))) + "°"
+  end
+
+  def temperature_color(value)
+    var stops = self.stops
+    var result = stops[1]
+    if value <= stops[0] return result end
+
+    var index = 0
+    while index < 20 && value >= stops[index + 2]
+      index += 2
+    end
+    if index >= 20 return stops[21] end
+
+    var first = stops[index + 1]
+    var second = stops[index + 3]
+    var amount = (value - stops[index]) * 1.0 / (stops[index + 2] - stops[index])
+    return rgb(int(first / 65536 % 256 + (second / 65536 % 256 - first / 65536 % 256) * amount),
+               int(first / 256 % 256 + (second / 256 % 256 - first / 256 % 256) * amount),
+               int(first % 256 + (second % 256 - first % 256) * amount))
+  end
+
+  def icon_for(code)
+    if code == 0 return "53386" end
+    if code <= 2 return "2286" end
+    if code == 3 return "53384" end
+    if code <= 48 return "17055" end
+    if code <= 67 return "2720" end
+    if code <= 77 return "2289" end
+    if code <= 82 return "49300" end
+    if code <= 86 return "2289" end
+    if code >= 95 return "29839" end
+    return "36637"
+  end
+
+  def on_body(response, status)
+    self.busy = false
+    shared.set("f", 0)
+    shared.set("weather_status", status)
+    if status != 200 || response == nil return end
+
+    var temperature_match = re.search("_2m\":([-0-9.]+)", response)
+    var code_match = re.search("code\":(\\d+)", response)
+    var forecast_match = re.search("_2m\":\\[([^\\]]*)", response)
+    if temperature_match == nil || code_match == nil || forecast_match == nil return end
+
+    var current = num(temperature_match[1])
+    if current == nil return end
+
+    var values = re.matchall("[-0-9.]+", forecast_match[1])
+    var count = size(values)
+    if count > 15 count = 15 end
+    var forecast = []
+    var index = 0
+    while index < count
+      var value = num(values[index])
+      if value != nil forecast.push(self.temperature_color(value)) end
+      index += 1
+    end
+
+    var trend = 0
+    if count > 0
+      var compare_index = count > 2 ? 2 : count - 1
+      var future = num(values[compare_index])
+      if future != nil
+        var difference = future - current
+        if difference > 0.5 trend = 1
+        elif difference < -0.5 trend = -1 end
+      end
+    end
+
+    self.temperature = current
+    self.label = self.temperature_label(current)
+    self.color = self.temperature_color(current)
+    self.forecast = forecast
+    self.weather_icon = self.icon_for(int(num(code_match[1])))
+    self.trend = trend
+    self.age = 0
+
+    store.set("temperature", current)
+    store.set("color", self.color)
+    store.set("icon", self.weather_icon)
+    store.set("trend", trend)
+    shared.set("temperature", current)
+    shared.set("trend", trend)
+  end
+
+  def tls_busy()
+    for key : shared.keys()
+      if size(key) > 2 && key[size(key) - 2 .. size(key) - 1] == ".f" && shared.get(key) == 1
+        var request_age = shared.age(key)
+        if request_age != nil && request_age < 20000 return true end
+      end
+    end
+    return false
+  end
+
+  def loop()
+    self.age += 1
+    if self.ticks <= 0 && !self.busy && !self.tls_busy()
+      self.ticks = self.period
+      self.busy = true
+      shared.set("f", 1)
+      http.get(self.url, / response, status -> self.on_body(response, status), self.opts)
+    end
+    self.ticks -= 1
+  end
+
+  def draw_trend()
+    if self.trend > 0
+      line(28, 1, 28, 6, 0xF87E27)
+      line(26, 3, 28, 1, 0xF87E27)
+      line(28, 1, 30, 3, 0xF87E27)
+    elif self.trend < 0
+      line(28, 1, 28, 6, 0x31B8DB)
+      line(26, 4, 28, 6, 0x31B8DB)
+      line(28, 6, 30, 4, 0x31B8DB)
+    end
+  end
+
+  def draw()
+    clear()
+    if self.label == nil
+      text(9, 6, "...", 0x666666)
+      return
+    end
+
+    if !icon(self.weather_icon, 0, 0)
+      circle_fill(4, 4, 3, 0xFFCC00)
+    end
+
+    text(10 + int((14 - text_ink_width(self.label)) / 2), 6, self.label, self.color)
+    self.draw_trend()
+
+    var index = 0
+    var count = size(self.forecast)
+    while index < count
+      pixel(9 + index, 7, self.forecast[index])
+      index += 1
+    end
+
+    if self.age > self.period * 2
+      pixel(width() - 1, height() - 1, 0xFF0000)
+    end
+  end
+
+  def on_button(button)
+    if button == "select" self.ticks = 0 end
+  end
+end
+
+return OpenMeteoWeather()

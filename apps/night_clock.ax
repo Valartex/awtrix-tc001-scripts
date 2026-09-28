@@ -1,0 +1,116 @@
+# @name    Ночные часы
+# @desc    Приглушённые часы по ночному расписанию
+# @author  RobG / Codex
+# Идея: Valart
+# @version 1.14
+# @config  night_start text   "Ночной режим с" default="23:00" maxlen=5
+# @config  night_end   text   "Дневной режим с" default="08:00" maxlen=5
+# @config  night_bri   slider "Ночная яркость" default=1 min=0 max=255
+# @config  tint        color  "Цвет ночных часов" default=#FF0000
+
+class NightClock
+  var start_m, end_m, night_bri, tint, mode
+  var saved_bri, saved_abri, was_night
+  var hh, mm, x0, x1, x2
+
+  def parse_min(text_value, fallback)
+    var match = re.search("(\\d)(\\d)?:(\\d)(\\d)", str(text_value))
+    if match == nil return fallback end
+    var hours = num(match[1], 0)
+    if match[2] != nil hours = hours * 10 + num(match[2], 0) end
+    var value = hours * 60 + num(match[3], 0) * 10 + num(match[4], 0)
+    return value >= 0 && value < 1440 ? value : fallback
+  end
+
+  def init()
+    self.start_m = self.parse_min(store.get("night_start"), 1380)
+    self.end_m = self.parse_min(store.get("night_end"), 480)
+    self.night_bri = store.get("night_bri")
+    self.tint = store.get("tint")
+    self.saved_bri = store.get("saved_bri", settings.get("brightness"))
+    self.saved_abri = store.get("saved_abri", settings.get("autoBrightness"))
+    self.was_night = store.get("night_active") == true
+    self.mode = -1
+    self.hh = nil
+    self.mm = nil
+    self.x0 = 0
+    self.x1 = 0
+    self.x2 = 0
+  end
+
+  def set_mode(night)
+    if night
+      if !self.was_night
+        self.saved_bri = settings.get("brightness")
+        self.saved_abri = settings.get("autoBrightness")
+        store.set("saved_bri", self.saved_bri)
+        store.set("saved_abri", self.saved_abri)
+        store.set("night_active", true)
+        self.was_night = true
+      end
+      settings.set("autoBrightness", false)
+      settings.set("brightness", self.night_bri)
+      rotation.pause()
+      rotation.show()
+    else
+      if self.was_night
+        settings.set("brightness", self.saved_bri)
+        settings.set("autoBrightness", self.saved_abri)
+        store.set("night_active", false)
+        self.was_night = false
+      end
+      rotation.resume()
+    end
+  end
+
+  def loop()
+    if now_ms() < 90000 || num(epoch_ms(), -1) < 0 return end
+    var hours = num(hour(), -1)
+    var minutes = num(minute(), -1)
+    if hours < 0 || minutes < 0 return end
+    var current = hours * 60 + minutes
+    var night = false
+    if self.start_m < self.end_m
+      night = current >= self.start_m && current < self.end_m
+    elif self.start_m > self.end_m
+      night = current >= self.start_m || current < self.end_m
+    end
+    var next_mode = night ? 1 : 0
+    if next_mode != self.mode
+      self.mode = next_mode
+      self.set_mode(night)
+    elif night
+      rotation.pause()
+    end
+    var display_hours = hours
+    if settings.get("time24h") == false
+      display_hours = display_hours % 12
+      if display_hours == 0 display_hours = 12 end
+    end
+    self.hh = str(display_hours)
+    self.mm = minutes < 10 ? "0" + str(minutes) : str(minutes)
+    var hours_width = num(text_width(self.hh), 0)
+    var colon_width = num(text_width(":"), 4)
+    var minutes_width = num(text_ink_width(self.mm), 0)
+    self.x0 = (width() - hours_width - colon_width - minutes_width) / 2
+    self.x1 = self.x0 + hours_width
+    self.x2 = self.x1 + colon_width
+  end
+
+  def should_show()
+    return self.mode == 1
+  end
+
+  def draw()
+    clear()
+    if self.hh == nil
+      text(1, 6, "...", 0x666666)
+      return
+    end
+    text(self.x0, 6, self.hh, self.tint)
+    text(self.x1, 6, ":", self.tint)
+    text(self.x2, 6, self.mm, self.tint)
+  end
+end
+
+return NightClock()
