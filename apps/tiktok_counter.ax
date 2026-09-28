@@ -1,0 +1,201 @@
+# @name    TikTok
+# @desc    Количество подписчиков профиля TikTok
+# @author  Blueforcer / Codex
+# Идея: Valart
+# @version 2.0
+# @config  user text "Имя профиля" default="blueforcer" maxlen=32
+
+class TikTokCounter
+  var user, user_id, search_url, stats_url, period
+  var count, label, full, err
+  var ticks, busy
+  var headers, glyph, pal, ramp
+
+  def init()
+    var configured = store.get("user")
+    var match = configured == nil ? nil : re.search("([A-Za-z0-9._]+)$", str(configured))
+    self.user = match == nil ? "" : match[1]
+    self.user_id = store.get("who") == self.user ? store.get("uid") : nil
+    self.search_url = "https://tiktok-api.tokcounter.com/user/search/" + self.user
+    self.stats_url = self.user_id == nil ? nil : "https://tiktok-api.tokcounter.com/user/stats/" + self.user_id
+    self.period = 3600
+
+    self.count = store.get("who") == self.user ? store.get("n") : nil
+    self.label = self.count == nil ? nil : self.human(self.count)
+    self.full = self.count == nil ? nil : str(self.count)
+    self.err = false
+    self.ticks = 2
+    self.busy = false
+
+    self.headers = {
+      'User-Agent': "Mozilla/5.0",
+      'Origin': "https://tokcount.com",
+      'Referer': "https://tokcount.com/"
+    }
+    self.glyph = [0x0070, 0x006C, 0x006B, 0x0470,
+                  0x1870, 0x1870, 0x1AB0, 0x06C0]
+    self.pal = [0x08CFF8, 0xFFFFFF, 0xFE2C55]
+    self.ramp = [0x08CFF8, 0xFE2C55]
+  end
+
+  def human(n)
+    if n < 1000 return str(n) end
+    var divisor = 1000
+    var suffix = "K"
+    if n >= 1000000000
+      divisor = 1000000000
+      suffix = "B"
+    elif n >= 1000000
+      divisor = 1000000
+      suffix = "M"
+    end
+    var value = n / (divisor + 0.0)
+    if value >= 10 return str(round(value)) + suffix end
+    var tenths = round(value * 10)
+    return str(int(tenths / 10)) + "." + str(tenths % 10) + suffix
+  end
+
+  def finish_request()
+    self.busy = false
+    shared.set("f", 0)
+  end
+
+  def on_search(body, status)
+    self.finish_request()
+
+    if status != 200 || body == nil
+      self.err = true
+      self.ticks = 300
+      return
+    end
+
+    var match = re.search("\"userId\":\"(\\d+)\"", body)
+    if match == nil
+      self.err = true
+      self.ticks = 300
+      return
+    end
+
+    self.user_id = match[1]
+    self.stats_url = "https://tiktok-api.tokcounter.com/user/stats/" + self.user_id
+    store.set("uid", self.user_id)
+    store.set("who", self.user)
+    self.err = false
+    self.ticks = 0
+  end
+
+  def on_stats(body, status)
+    self.finish_request()
+
+    if status != 200 || body == nil
+      if status == 404
+        self.user_id = nil
+        self.stats_url = nil
+        store.set("uid", nil)
+      end
+      self.err = true
+      self.ticks = 300
+      return
+    end
+
+    var match = re.search("(\\d+)", body)
+    if match == nil
+      self.err = true
+      self.ticks = 300
+      return
+    end
+
+    var value = num(match[1])
+    if value == nil
+      self.err = true
+      self.ticks = 300
+      return
+    end
+
+    self.err = false
+    self.ticks = self.period
+    if value == self.count return end
+
+    self.count = value
+    self.full = str(value)
+    self.label = self.human(value)
+    store.set("n", value)
+    store.set("who", self.user)
+  end
+
+  def tls_busy()
+    for key : shared.keys()
+      if size(key) > 2 && key[size(key) - 2 .. size(key) - 1] == ".f" && shared.get(key) == 1
+        var age = shared.age(key)
+        if age != nil && age < 20000 return true end
+      end
+    end
+    return false
+  end
+
+  def search_user()
+    self.busy = true
+    self.ticks = 300
+    shared.set("f", 1)
+    http.get(self.search_url, / body, status -> self.on_search(body, status), {
+      'headers': self.headers,
+      'find': "\"id\":\"" + self.user + "\"",
+      'keep': 160
+    })
+  end
+
+  def get_stats()
+    self.busy = true
+    self.ticks = self.period
+    shared.set("f", 1)
+    http.get(self.stats_url, / body, status -> self.on_stats(body, status), {
+      'headers': self.headers,
+      'find': "\"followerCount\":",
+      'keep': 32
+    })
+  end
+
+  def loop()
+    if self.user == "" return end
+
+    if self.ticks <= 0 && !self.busy && !self.tls_busy()
+      if self.user_id == nil
+        self.search_user()
+      else
+        self.get_stats()
+      end
+    end
+    self.ticks -= 1
+  end
+
+  def draw()
+    clear()
+
+    for y : 0 .. 7
+      var row = self.glyph[y]
+      for x : 0 .. 7
+        var color = (row >> (14 - 2 * x)) & 3
+        if color > 0 pixel(x, y, self.pal[color - 1]) end
+      end
+    end
+
+    if self.label != nil
+      var available = width() - 9
+      var value = self.full
+      var value_width = text_ink_width(value)
+      if value_width > available
+        value = self.label
+        value_width = text_ink_width(value)
+      end
+      ramp_text(9 + (available - value_width) / 2, 6, value, self.ramp)
+      return
+    end
+
+    var placeholder = self.err ? "?" : "..."
+    var placeholder_width = text_ink_width(placeholder)
+    text(9 + (width() - 9 - placeholder_width) / 2, 6, placeholder,
+         self.err ? 0xCC7722 : 0x555555)
+  end
+end
+
+return TikTokCounter()
